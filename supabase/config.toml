@@ -1,0 +1,22 @@
+
+[functions.first-aid-guidance]
+enabled = true
+verify_jwt = false
+import_map = "./functions/first-aid-guidance/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/first-aid-guidance/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/first-aid-guidance/*.html" ]
+
+[functions.camera-suppression]
+enabled = true
+verify_jwt = false
+import_map = "./functions/camera-suppression/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/camera-suppression/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/camera-suppression/*.html" ]

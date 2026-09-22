@@ -365,6 +365,40 @@ supabase.from('alerts').insert({
       'STATUS_CHANGE',
       emergencyId
     );
+
+    // Check if this resolved emergency was tied to an AI incident.
+    // Only clear the camera once BOTH linked units (ambulance + police, if any) are resolved.
+    const linkedIncident = aiIncidents.find(
+      i => i.assignedVehicleId === emergencyId || i.assignedPoliceEmergencyId === emergencyId
+    );
+
+    if (linkedIncident) {
+      const ambulanceResolved =
+        !linkedIncident.assignedVehicleId ||
+        linkedIncident.assignedVehicleId === emergencyId ||
+        emergencyRequests.find(e => e.id === linkedIncident.assignedVehicleId)?.status === 'RESOLVED';
+
+      const policeResolved =
+        !linkedIncident.assignedPoliceEmergencyId ||
+        linkedIncident.assignedPoliceEmergencyId === emergencyId ||
+        emergencyRequests.find(e => e.id === linkedIncident.assignedPoliceEmergencyId)?.status === 'RESOLVED';
+
+      if (ambulanceResolved && policeResolved) {
+        setAiIncidents(prev =>
+          prev.map(i => (i.id === linkedIncident.id ? { ...i, status: 'RESOLVED' } : i))
+        );
+
+        if (linkedIncident.cameraId) {
+          setCctvCameras(prev =>
+            prev.map(c =>
+              c.id === linkedIncident.cameraId
+                ? { ...c, hasIncident: false, incidentType: undefined, aiConfidence: undefined }
+                : c
+            )
+          );
+        }
+      }
+    }
   };
 
   // Trigger Mock AI Incident
@@ -377,18 +411,19 @@ supabase.from('alerts').insert({
     const loc = CITY_LANDMARKS[targetCamera.locationName] || CITY_LANDMARKS['Highway'];
 
     const newInc: AIIncident = {
-      id: incId,
-      type,
-      location: `${targetCamera.locationName} Cross`,
-      locationCoords: loc,
-      source: `${targetCamera.number} (${targetCamera.name})`,
-      timestamp: new Date().toTimeString().split(' ')[0],
-      severity: 'HIGH',
-      recommendedResponse: 'Ambulance + Police Unit',
-      autoDispatched: false,
-      status: 'DETECTED',
-      confidenceScore: 0.95
-    };
+  id: incId,
+  cameraId: targetCamera.id,
+  type,
+  location: `${targetCamera.locationName} Cross`,
+  locationCoords: loc,
+  source: `${targetCamera.number} (${targetCamera.name})`,
+  timestamp: new Date().toTimeString().split(' ')[0],
+  severity: 'HIGH',
+  recommendedResponse: 'Ambulance + Police Unit',
+  autoDispatched: false,
+  status: 'DETECTED',
+  confidenceScore: 0.95
+};
 
     setAiIncidents(prev => [newInc, ...prev]);
 

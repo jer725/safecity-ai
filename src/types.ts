@@ -98,8 +98,9 @@ export interface AIIncident {
   recommendedResponse: string;
   autoDispatched: boolean;
   status: 'DETECTED' | 'DISPATCHED' | 'RESOLVED';
-  assignedVehicleId?: string;
-    assignedPoliceEmergencyId?: string;
+    assignedVehicleId?: string;
+  assignedPoliceEmergencyId?: string;
+  cameraId?: string;
   confidenceScore: number;
 }
 

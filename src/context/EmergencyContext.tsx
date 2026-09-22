@@ -1,4 +1,3 @@
-import { supabase } from '../utils/supabaseClient';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   Role,
@@ -16,7 +15,8 @@ import {
   INITIAL_CHECKPOINTS,
   INITIAL_CCTV_CAMERAS,
   INITIAL_VEHICLES,
-  INITIAL_AI_INCIDENTS
+  INITIAL_AI_INCIDENTS,
+  INITIAL_ALERT_LOGS
 } from '../data/mockData';
 import { playAlertTone, setSoundMuted, getSoundMuted } from '../utils/audio';
 
@@ -37,7 +37,7 @@ interface EmergencyContextType {
   activeTrafficAlert: TrafficCheckpoint | null;
 
   // Actions
-  dispatchEmergency: (serviceType: ServiceType, landmarkName: string, incidentType?: string) => string;
+  dispatchEmergency: (serviceType: ServiceType, landmarkName: string, incidentType?: string, source?: 'SOS' | 'AI_DETECTION') => string;
   updateFirstAidCondition: (conditionName: string, notes?: string) => void;
   acknowledgeTrafficAlert: (checkpointId: string) => void;
   toggleGreenCorridor: (checkpointId: string) => void;
@@ -58,7 +58,7 @@ export const EmergencyProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [checkpoints, setCheckpoints] = useState<TrafficCheckpoint[]>(INITIAL_CHECKPOINTS);
   const [cctvCameras, setCctvCameras] = useState<CCTVCamera[]>(INITIAL_CCTV_CAMERAS);
   const [aiIncidents, setAiIncidents] = useState<AIIncident[]>([]);
-  const [alertLogs, setAlertLogs] = useState<AlertLog[]>([]);
+  const [alertLogs, setAlertLogs] = useState<AlertLog[]>(INITIAL_ALERT_LOGS);
   const [soundMuted, setSoundMutedState] = useState<boolean>(false);
   const [simulationSpeed, setSimulationSpeed] = useState<number>(1);
   const [activeTrafficAlert, setActiveTrafficAlert] = useState<TrafficCheckpoint | null>(null);
@@ -93,10 +93,9 @@ export const EmergencyProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     checkpointAlertsSent: []
   };
 
-  const [emergencyRequests, setEmergencyRequests] = useState<EmergencyRequest[]>([]);
+    const [emergencyRequests, setEmergencyRequests] = useState<EmergencyRequest[]>([]);
 
   const [currentEmergency, setCurrentEmergency] = useState<EmergencyRequest | null>(null);
-
   const setActiveRole = (role: Role) => {
     setActiveRoleState(role);
     playAlertTone('CLICK');
@@ -120,7 +119,7 @@ export const EmergencyProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const now = new Date();
     const timeStr = now.toTimeString().split(' ')[0];
     const newLog: AlertLog = {
-      id: `LOG${Date.now()}${Math.floor(Math.random() * 1000)}`,
+      id: `LOG${Date.now().toString().slice(-4)}`,
       timestamp: timeStr,
       level,
       message,
@@ -212,21 +211,7 @@ export const EmergencyProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       },
       checkpointAlertsSent: []
     };
-// Save this dispatch to Supabase (permanent log, independent of website refresh)
-supabase.from('alerts').insert({
-  emergency_id: emgId,
-  vehicle_id: assignedId,
-  vehicle_type: serviceType,
-  emergency_type: incidentType,
-  from_location: availableVehicle.currentLocationName,
-  to_location: targetLandmark.name,
-  from_landmark: availableVehicle.currentLocationName,
-  to_landmark: targetLandmark.name,
-  triggered_by: source === 'AI_DETECTION' ? 'AI_DETECTION' : 'CITIZEN_SOS',
-  dispatched_at: new Date().toISOString()
-}).then(({ error }) => {
-  if (error) console.error('Supabase insert failed:', error);
-});
+
     setEmergencyRequests(prev => [newEmergency, ...prev]);
     setCurrentEmergency(newEmergency);
 
@@ -267,7 +252,12 @@ supabase.from('alerts').insert({
     setCheckpoints(prev =>
       prev.map(cp =>
         cp.id === checkpointId
-          ? { ...cp, isAcknowledged: true, currentStatus: 'NORMAL', actionRequired: 'Traffic cleared for emergency transit' }
+          ? {
+              ...cp,
+              isAcknowledged: true,
+              currentStatus: 'NORMAL',
+              actionRequired: 'Traffic cleared for emergency transit'
+            }
           : cp
       )
     );
@@ -309,19 +299,15 @@ supabase.from('alerts').insert({
   };
 
   // Resolve Emergency
+  // NOTE: This is called from setTimeout callbacks (both the main simulation loop and
+  // fastForwardEmergency's "Instant Arrival" path). Because of that, it must NEVER read
+  // aiIncidents/emergencyRequests to make cross-unit decisions here — those closures can
+  // be stale by the time the timeout fires. Any logic that depends on "have BOTH linked
+  // units resolved yet" lives in the separate useEffect below instead, which always sees
+  // fresh state.
   const resolveEmergency = (emergencyId: string) => {
-  let resolvedVehicleId = '';
-
-  // Update Supabase: mark this dispatch as arrived
-  supabase
-    .from('alerts')
-    .update({ arrived_at: new Date().toISOString() })
-    .eq('emergency_id', emergencyId)
-    .then(({ error }) => {
-      if (error) console.error('Supabase arrival update failed:', error);
-    });
-
-  setEmergencyRequests(prev =>
+    let resolvedVehicleId = '';
+    setEmergencyRequests(prev =>
       prev.map(e => {
         if (e.id === emergencyId) {
           resolvedVehicleId = e.assignedVehicleId;
@@ -365,65 +351,33 @@ supabase.from('alerts').insert({
       'STATUS_CHANGE',
       emergencyId
     );
-
-    // Check if this resolved emergency was tied to an AI incident.
-    // Only clear the camera once BOTH linked units (ambulance + police, if any) are resolved.
-    const linkedIncident = aiIncidents.find(
-      i => i.assignedVehicleId === emergencyId || i.assignedPoliceEmergencyId === emergencyId
-    );
-
-    if (linkedIncident) {
-      const ambulanceResolved =
-        !linkedIncident.assignedVehicleId ||
-        linkedIncident.assignedVehicleId === emergencyId ||
-        emergencyRequests.find(e => e.id === linkedIncident.assignedVehicleId)?.status === 'RESOLVED';
-
-      const policeResolved =
-        !linkedIncident.assignedPoliceEmergencyId ||
-        linkedIncident.assignedPoliceEmergencyId === emergencyId ||
-        emergencyRequests.find(e => e.id === linkedIncident.assignedPoliceEmergencyId)?.status === 'RESOLVED';
-
-      if (ambulanceResolved && policeResolved) {
-        setAiIncidents(prev =>
-          prev.map(i => (i.id === linkedIncident.id ? { ...i, status: 'RESOLVED' } : i))
-        );
-
-        if (linkedIncident.cameraId) {
-          setCctvCameras(prev =>
-            prev.map(c =>
-              c.id === linkedIncident.cameraId
-                ? { ...c, hasIncident: false, incidentType: undefined, aiConfidence: undefined }
-                : c
-            )
-          );
-        }
-      }
-    }
   };
 
   // Trigger Mock AI Incident
   const triggerMockAIIncident = (type = 'Road Blockage / Collision', cameraName?: string) => {
     const incNumber = Math.floor(5000 + Math.random() * 900);
     const incId = `INC${incNumber}`;
+    const eligibleCameras = cctvCameras.filter(c => !c.suppressed);
+    const cameraPool = eligibleCameras.length > 0 ? eligibleCameras : cctvCameras;
     const targetCamera = cameraName
-      ? cctvCameras.find(c => c.number === cameraName || c.name.includes(cameraName)) || cctvCameras[Math.floor(Math.random() * cctvCameras.length)]
-      : cctvCameras[Math.floor(Math.random() * cctvCameras.length)];
+      ? cameraPool.find(c => c.number === cameraName || c.name.includes(cameraName)) || cameraPool[Math.floor(Math.random() * cameraPool.length)]
+      : cameraPool[Math.floor(Math.random() * cameraPool.length)];
     const loc = CITY_LANDMARKS[targetCamera.locationName] || CITY_LANDMARKS['Highway'];
 
     const newInc: AIIncident = {
-  id: incId,
-  cameraId: targetCamera.id,
-  type,
-  location: `${targetCamera.locationName} Cross`,
-  locationCoords: loc,
-  source: `${targetCamera.number} (${targetCamera.name})`,
-  timestamp: new Date().toTimeString().split(' ')[0],
-  severity: 'HIGH',
-  recommendedResponse: 'Ambulance + Police Unit',
-  autoDispatched: false,
-  status: 'DETECTED',
-  confidenceScore: 0.95
-};
+      id: incId,
+      cameraId: targetCamera.id,
+      type,
+      location: `${targetCamera.locationName} Cross`,
+      locationCoords: loc,
+      source: `${targetCamera.number} (${targetCamera.name})`,
+      timestamp: new Date().toTimeString().split(' ')[0],
+      severity: 'HIGH',
+      recommendedResponse: 'Ambulance + Police Unit',
+      autoDispatched: false,
+      status: 'DETECTED',
+      confidenceScore: 0.95
+    };
 
     setAiIncidents(prev => [newInc, ...prev]);
 
@@ -511,21 +465,12 @@ supabase.from('alerts').insert({
 
   // Fast forward emergency ETA for judges / testing
   const fastForwardEmergency = (emergencyId?: string, targetMinutes?: number) => {
-    // One click = move only ONE still-active vehicle (not all at once)
-    const firstActive = emergencyRequests.find(
-      e => e.status === 'DISPATCHED' || e.status === 'EN_ROUTE'
-    );
-    const targetIds = emergencyId
-      ? [emergencyId]
-      : firstActive
-      ? [firstActive.id]
-      : [];
-
-    if (targetIds.length === 0) return;
+    const targetId = emergencyId || currentEmergency?.id;
+    if (!targetId) return;
 
     setEmergencyRequests(prev =>
       prev.map(e => {
-        if (targetIds.includes(e.id)) {
+        if (e.id === targetId) {
           const nextEta = targetMinutes !== undefined ? targetMinutes : Math.max(0, e.etaMinutes - 5);
           const nextProgress = nextEta === 0 ? 100 : Math.min(95, 100 - (nextEta / 22) * 100);
           const nextStatus = nextEta === 0 ? 'ARRIVED' : 'EN_ROUTE';
@@ -562,7 +507,7 @@ supabase.from('alerts').insert({
       })
     );
 
-    if (currentEmergency && targetIds.includes(currentEmergency.id)) {
+    if (currentEmergency && currentEmergency.id === targetId) {
       setCurrentEmergency(prev => {
         if (!prev) return null;
         const nextEta = targetMinutes !== undefined ? targetMinutes : Math.max(0, prev.etaMinutes - 5);
@@ -589,12 +534,47 @@ supabase.from('alerts').insert({
     setCheckpoints(INITIAL_CHECKPOINTS);
     setCctvCameras(INITIAL_CCTV_CAMERAS);
     setAiIncidents([]);
-    setAlertLogs([]);
+    setAlertLogs(INITIAL_ALERT_LOGS);
     setEmergencyRequests([defaultEmergency]);
     setCurrentEmergency(defaultEmergency);
     setActiveTrafficAlert(null);
     playAlertTone('SUCCESS');
   };
+
+  // Watches for AI incidents whose linked units (ambulance + police, if both exist) have
+  // ALL resolved, then clears the incident status and resets its camera back to normal.
+  // Runs on every emergencyRequests/aiIncidents change, so it always sees current state —
+  // this avoids the stale-closure timing bug that setTimeout-based checks can hit.
+  useEffect(() => {
+    aiIncidents.forEach(inc => {
+      if (inc.status === 'RESOLVED') return;
+      if (!inc.assignedVehicleId && !inc.assignedPoliceEmergencyId) return;
+
+      const ambulanceResolved =
+        !inc.assignedVehicleId ||
+        emergencyRequests.find(e => e.id === inc.assignedVehicleId)?.status === 'RESOLVED';
+
+      const policeResolved =
+        !inc.assignedPoliceEmergencyId ||
+        emergencyRequests.find(e => e.id === inc.assignedPoliceEmergencyId)?.status === 'RESOLVED';
+
+      if (ambulanceResolved && policeResolved) {
+        setAiIncidents(prev =>
+          prev.map(i => (i.id === inc.id ? { ...i, status: 'RESOLVED' } : i))
+        );
+
+        if (inc.cameraId) {
+          setCctvCameras(prev =>
+            prev.map(c =>
+              c.id === inc.cameraId
+                ? { ...c, hasIncident: false, incidentType: undefined, aiConfidence: undefined }
+                : c
+            )
+          );
+        }
+      }
+    });
+  }, [emergencyRequests, aiIncidents]);
 
   // Main Real-time Simulation Engine
   useEffect(() => {
